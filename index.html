@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ご予約</title>
+<style>
+  :root { --bondi: #0095b6; --ink: #1f2a30; --sub: #4a5a62; --line: #d5dde1; --bg: #f5f8f9; --danger: #c0392b; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif; color: var(--ink); background: var(--bg); font-size: 17px; }
+  header { background: #fff; border-bottom: 1px solid var(--line); padding: 14px 16px; font-weight: 700; font-size: 19px; }
+  main { padding: 16px; max-width: 520px; margin: 0 auto; }
+  h2 { font-size: 18px; margin: 4px 0 12px; }
+  .steps { display: flex; gap: 4px; margin-bottom: 14px; }
+  .steps span { flex: 1; height: 5px; border-radius: 3px; background: var(--line); }
+  .steps span.on { background: var(--bondi); }
+  .card { background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 14px; margin-bottom: 10px; }
+  .pick { display: block; width: 100%; text-align: left; background: #fff; border: 2px solid var(--line); border-radius: 10px; padding: 14px; margin-bottom: 10px; font-size: 17px; color: var(--ink); }
+  .pick small { display: block; color: var(--sub); font-size: 14px; margin-top: 4px; }
+  .pick.sel { border-color: var(--bondi); background: #e6f5f8; }
+  .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  .grid button { padding: 12px 0; font-size: 16px; border: 2px solid var(--line); border-radius: 8px; background: #fff; color: var(--ink); }
+  .grid button.sel { background: var(--bondi); border-color: var(--bondi); color: #fff; }
+  .grid button:disabled { color: #b0babf; background: #eef1f2; }
+  .days { grid-template-columns: repeat(4, 1fr); }
+  .days button small { display: block; font-size: 13px; }
+  .main-btn { display: block; width: 100%; padding: 15px; font-size: 18px; font-weight: 700; border: none; border-radius: 10px; background: var(--bondi); color: #fff; margin-top: 14px; }
+  .main-btn:disabled { background: #9fc9d3; }
+  .sub-btn { display: inline-block; padding: 9px 14px; font-size: 15px; border: 1px solid var(--line); border-radius: 8px; background: #fff; color: var(--ink); margin: 8px 8px 0 0; }
+  .sub-btn.danger { color: var(--danger); border-color: #e3b5b0; }
+  .back { background: none; border: none; color: var(--bondi); font-size: 16px; padding: 4px 0 12px; }
+  .msg { padding: 12px 14px; border-radius: 8px; margin-bottom: 12px; font-size: 16px; line-height: 1.5; }
+  .msg.err { background: #fdecea; color: var(--danger); }
+  .msg.info { background: #e6f5f8; color: #035e72; }
+  .row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #eef1f2; }
+  .row:last-child { border-bottom: none; }
+  .row b { color: var(--sub); font-weight: 600; margin-right: 12px; white-space: nowrap; }
+  .muted { color: var(--sub); font-size: 15px; }
+</style>
+</head>
+<body>
+<header id="shop">ご予約</header>
+<main id="app"><div class="msg info">読み込んでいます…</div></main>
+
+<script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+<script src="config.js"></script>
+<script>
+const CFG = window.SALON_CONFIG;
+const app = document.getElementById('app');
+let D = null;            // 店・メニュー・スタッフ・日付・ご予約中
+let S = {};              // いま選んでいる物
+let busy = false;
+
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const yen = n => n ? n.toLocaleString('ja-JP') + '円' : '';
+const dateJa = (d, wd) => { const [, m, dd] = d.split('-'); return `${Number(m)}月${Number(dd)}日（${wd}）`; };
+
+async function api(action, body = {}) {
+  const res = await fetch(CFG.API_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // この形だとGoogleの窓口へ直接送れる
+    body: JSON.stringify({ action, idToken: liff.getIDToken(), ...body })
+  });
+  const j = await res.json();
+  if (!j.ok) {
+    // 確認の期限切れは1回だけ自動で開き直す（設定ミスで何度も失敗する時は止めて文字を出す）
+    if (j.code === 'TOKEN' && !sessionStorage.getItem('retried')) {
+      sessionStorage.setItem('retried', '1'); liff.logout(); location.reload();
+      return new Promise(() => {});
+    }
+    const e = new Error(j.error); e.code = j.code; throw e;
+  }
+  return j.data;
+}
+
+function view(html) { app.innerHTML = html; window.scrollTo(0, 0); }
+function steps(n) { return '<div class="steps">' + [1, 2, 3, 4, 5].map(i => `<span class="${i <= n ? 'on' : ''}"></span>`).join('') + '</div>'; }
+function errBox(e) { return e ? `<div class="msg err">${esc(e)}</div>` : ''; }
+
+// ---------- はじめの画面：ご予約中＋新しく予約 ----------
+function home(note) {
+  S = {};
+  const mine = D.mine.map(b => `
+    <div class="card">
+      <div style="font-weight:700;font-size:18px">${dateJa(b.date, b.weekday)} ${esc(b.start)}〜${esc(b.end)}</div>
+      <div class="muted">${esc(b.menu)} ／ 担当 ${esc(b.staff)}</div>
+      ${b.canModify
+        ? `<button class="sub-btn" onclick="startChange('${b.id}')">日時・内容を変更</button><button class="sub-btn danger" onclick="askCancel('${b.id}')">取り消す</button>`
+        : `<div class="muted" style="margin-top:6px">${D.shop.modifyHours}時間前を過ぎたため、変更・取消はお店へお電話ください${D.shop.phone ? '（' + esc(D.shop.phone) + '）' : ''}。</div>`}
+    </div>`).join('');
+  view(`${note || ''}
+    ${D.mine.length ? '<h2>ご予約中</h2>' + mine : ''}
+    <button class="main-btn" onclick="stepMenu()">新しく予約する</button>`);
+}
+
+// ---------- 1 メニュー ----------
+function stepMenu() {
+  view(`<button class="back" onclick="home()">← もどる</button>${steps(1)}
+    <h2>${S.changing ? '変更後の' : ''}メニューを選んでください</h2>
+    ${D.menus.map(m => `<button class="pick ${S.menuId === m.id ? 'sel' : ''}" onclick="S.menuId='${m.id}';stepStaff()">
+      ${esc(m.name)}　<span class="muted">${m.minutes}分 ${yen(m.price)}</span>${m.note ? `<small>${esc(m.note)}</small>` : ''}</button>`).join('')}`);
+}
+
+// ---------- 2 担当 ----------
+function stepStaff() {
+  const opts = [{ id: '', name: '指名なし', note: '空いているスタッフが担当します' }].concat(D.staff);
+  view(`<button class="back" onclick="stepMenu()">← もどる</button>${steps(2)}
+    <h2>担当を選んでください</h2>
+    ${opts.map(s => `<button class="pick ${S.staffId === s.id ? 'sel' : ''}" onclick="S.staffId='${s.id}';stepDate()">
+      ${esc(s.name)}${s.note ? `<small>${esc(s.note)}</small>` : ''}</button>`).join('')}`);
+}
+
+// ---------- 3 日付 ----------
+function stepDate() {
+  view(`<button class="back" onclick="stepStaff()">← もどる</button>${steps(3)}
+    <h2>日にちを選んでください</h2>
+    <div class="grid days">${D.days.map(d => {
+      const [, m, dd] = d.date.split('-');
+      return `<button class="${S.date === d.date ? 'sel' : ''}" ${d.closed ? 'disabled' : ''} onclick="S.date='${d.date}';stepTime()">
+        ${Number(m)}/${Number(dd)}<small>${d.closed ? '休み' : d.weekday}</small></button>`;
+    }).join('')}</div>`);
+}
+
+// ---------- 4 時間 ----------
+async function stepTime(err) {
+  const day = D.days.find(d => d.date === S.date);
+  const head = `<button class="back" onclick="stepDate()">← もどる</button>${steps(4)}${errBox(err)}<h2>${dateJa(day.date, day.weekday)}の時間を選んでください</h2>`;
+  view(head + '<div class="msg info">空き時間を確かめています…</div>');
+  try {
+    const times = await api('slots', { date: S.date, menuId: S.menuId, staffId: S.staffId, changingId: S.changing?.id || '' });
+    view(head + (times.length
+      ? `<div class="grid">${times.map(t => `<button class="${S.time === t ? 'sel' : ''}" onclick="S.time='${t}';stepConfirm()">${t}</button>`).join('')}</div>`
+      : '<div class="msg info">この日は空きがありません。ほかの日をお選びください。</div>'));
+  } catch (e) { view(head + errBox(e.message)); }
+}
+
+// ---------- 5 確認 ----------
+function stepConfirm(err) {
+  const m = D.menus.find(x => x.id === S.menuId);
+  const st = S.staffId ? D.staff.find(x => x.id === S.staffId).name : '指名なし';
+  const day = D.days.find(d => d.date === S.date);
+  const old = S.changing ? `<div class="row"><b>変更前</b><span>${dateJa(S.changing.date, S.changing.weekday)} ${S.changing.start} ${esc(S.changing.menu)}</span></div>` : '';
+  view(`<button class="back" onclick="stepTime()">← もどる</button>${steps(5)}${errBox(err)}
+    <h2>この内容で${S.changing ? '変更' : '予約'}しますか？</h2>
+    <div class="card">${old}
+      <div class="row"><b>日時</b><span>${dateJa(day.date, day.weekday)} ${S.time}</span></div>
+      <div class="row"><b>メニュー</b><span>${esc(m.name)}（${m.minutes}分）</span></div>
+      <div class="row"><b>料金</b><span>${yen(m.price)}</span></div>
+      <div class="row"><b>担当</b><span>${esc(st)}</span></div>
+    </div>
+    <button class="main-btn" id="go" onclick="book()">${S.changing ? '変更を確定する' : '予約を確定する'}</button>`);
+}
+
+async function book() {
+  if (busy) return;
+  busy = true;
+  const btn = document.getElementById('go');
+  btn.disabled = true; btn.textContent = '送っています…';
+  try {
+    const r = await api('book', { date: S.date, time: S.time, menuId: S.menuId, staffId: S.staffId, changingId: S.changing?.id || '' });
+    const changed = !!S.changing;
+    D = await api('init');
+    view(`<div class="msg info" style="font-size:18px;font-weight:700">${changed ? '予約を変更しました' : 'ご予約を受け付けました'}</div>
+      <div class="card">
+        <div class="row"><b>日時</b><span>${dateJa(r.date, r.weekday)} ${r.start}〜${r.end}</span></div>
+        <div class="row"><b>メニュー</b><span>${esc(r.menu)}</span></div>
+        <div class="row"><b>担当</b><span>${esc(r.staff)}</span></div>
+      </div>
+      <p class="muted">確認のメッセージをLINEにお送りしました。前日にもお知らせします。</p>
+      <button class="main-btn" onclick="liff.isInClient() ? liff.closeWindow() : home()">閉じる</button>`);
+  } catch (e) {
+    if (e.code === 'TAKEN') { S.time = null; stepTime(e.message); } else stepConfirm(e.message);
+  } finally { busy = false; }
+}
+
+// ---------- 変更・取消 ----------
+function startChange(id) {
+  const b = D.mine.find(x => x.id === id);
+  S = { changing: b, menuId: b.menuId, staffId: b.staffId, date: null, time: null };
+  stepMenu();
+}
+
+function askCancel(id) {
+  const b = D.mine.find(x => x.id === id);
+  view(`<button class="back" onclick="home()">← もどる</button>
+    <h2>このご予約を取り消しますか？</h2>
+    <div class="card"><div style="font-weight:700">${dateJa(b.date, b.weekday)} ${b.start}〜${b.end}</div>
+      <div class="muted">${esc(b.menu)} ／ 担当 ${esc(b.staff)}</div></div>
+    <button class="main-btn" id="go" style="background:var(--danger)" onclick="doCancel('${b.id}')">取り消す</button>`);
+}
+
+async function doCancel(id) {
+  if (busy) return;
+  busy = true;
+  const btn = document.getElementById('go');
+  btn.disabled = true; btn.textContent = '取り消しています…';
+  try {
+    await api('cancel', { id });
+    D = await api('init');
+    home('<div class="msg info">ご予約を取り消しました。</div>');
+  } catch (e) { home(errBox(e.message)); } finally { busy = false; }
+}
+
+// ---------- 起動 ----------
+(async () => {
+  try {
+    if (!CFG.LIFF_ID || !CFG.API_URL) throw new Error('config.js の LIFF_ID と API_URL がまだ空です。');
+    await liff.init({ liffId: CFG.LIFF_ID });
+    if (!liff.isLoggedIn()) { liff.login({ redirectUri: location.href }); return; }
+    D = await api('init');
+    sessionStorage.removeItem('retried');
+    document.getElementById('shop').textContent = D.shop.name + '　ご予約';
+    document.title = D.shop.name + ' ご予約';
+    home();
+  } catch (e) {
+    view(errBox('開けませんでした：' + e.message));
+  }
+})();
+</script>
+</body>
+</html>
