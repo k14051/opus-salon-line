@@ -103,7 +103,10 @@ function stepMenu() {
 
 // ---------- 2 担当 ----------
 function stepStaff() {
-  const opts = [{ id: '', name: '指名なし', note: '空いているスタッフが担当します' }].concat(D.staff);
+  // 選んだメニューができる人だけを出す
+  const capable = D.staff.filter(s => s.menus.includes(S.menuId));
+  if (S.staffId && !capable.some(s => s.id === S.staffId)) S.staffId = '';
+  const opts = [{ id: '', name: '指名なし', note: '空いているスタッフが担当します' }].concat(capable.map(s => ({ ...s, note: s.role })));
   view(`<button class="back" onclick="stepMenu()">← もどる</button>${steps(2)}
     <h2>担当を選んでください</h2>
     ${opts.map(s => `<button class="pick ${S.staffId === s.id ? 'sel' : ''}" onclick="S.staffId='${s.id}';stepDate()">
