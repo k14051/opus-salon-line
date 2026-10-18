@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>シフト希望</title>
+<style>
+  :root { --bondi: #0095b6; --ink: #1f2a30; --sub: #4a5a62; --line: #d5dde1; --bg: #f5f8f9; --danger: #c0392b; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif; color: var(--ink); background: var(--bg); font-size: 17px; }
+  header { background: #fff; border-bottom: 1px solid var(--line); padding: 14px 16px; font-weight: 700; font-size: 19px; }
+  main { padding: 16px; max-width: 560px; margin: 0 auto; }
+  h2 { font-size: 18px; margin: 18px 0 8px; }
+  .card { background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin-bottom: 10px; }
+  .msg { padding: 12px 14px; border-radius: 8px; margin-bottom: 12px; font-size: 16px; line-height: 1.5; }
+  .msg.err { background: #fdecea; color: var(--danger); }
+  .msg.info { background: #e6f5f8; color: #035e72; }
+  .muted { color: var(--sub); font-size: 15px; }
+  .day { background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; }
+  .day.closed { background: #eceff1; color: #78909c; }
+  .day-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; }
+  .day-head b { font-size: 17px; }
+  .choices { display: flex; gap: 6px; }
+  .choices button { flex: 1; padding: 10px 0; font-size: 15px; border: 2px solid var(--line); border-radius: 8px; background: #fff; color: var(--ink); }
+  .choices button.sel { background: var(--bondi); border-color: var(--bondi); color: #fff; }
+  .times { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+  .times select { flex: 1; font-size: 17px; padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+  textarea { width: 100%; min-height: 70px; font-size: 16px; padding: 10px; border: 1px solid var(--line); border-radius: 8px; }
+  input.code { width: 100%; font-size: 24px; letter-spacing: 6px; text-align: center; padding: 12px; border: 2px solid var(--line); border-radius: 10px; }
+  .main-btn { display: block; width: 100%; padding: 15px; font-size: 18px; font-weight: 700; border: none; border-radius: 10px; background: var(--bondi); color: #fff; margin-top: 14px; }
+  .main-btn:disabled { background: #9fc9d3; }
+  .row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #eef1f2; }
+  .row:last-child { border-bottom: none; }
+  .row.off { color: #78909c; }
+</style>
+</head>
+<body>
+<header id="title">シフト希望</header>
+<main id="app"><div class="msg info">読み込んでいます…</div></main>
+
+<script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+<script src="config.js"></script>
+<script>
+const CFG = window.SALON_CONFIG;
+const app = document.getElementById('app');
+let D = null;   // 画面の中身
+let W = {};     // 日付 → '' / '休み' / '13:00-19:00'
+let busy = false;
+
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const md = (d, wd) => `${Number(d.slice(5, 7))}/${Number(d.slice(8, 10))}（${wd}）`;
+const wdOf = d => '日月火水木金土'[new Date(d + 'T00:00:00+09:00').getDay()];
+const toMin = t => Number(t.split(':')[0]) * 60 + Number(t.split(':')[1]);
+const toHHMM = m => String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0');
+
+async function api(action, body = {}) {
+  const res = await fetch(CFG.API_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify({ action, idToken: liff.getIDToken(), ...body })
+  });
+  const j = await res.json();
+  if (!j.ok) {
+    if (j.code === 'TOKEN' && !sessionStorage.getItem('retried')) {
+      sessionStorage.setItem('retried', '1'); liff.logout(); location.reload();
+      return new Promise(() => {});
+    }
+    throw new Error(j.error);
+  }
+  return j.data;
+}
+
+function view(html) { app.innerHTML = html; }
+function errBox(e) { return e ? `<div class="msg err">${esc(e)}</div>` : ''; }
+
+// ---------- 登録 ----------
+function registerView(err) {
+  view(`${errBox(err)}
+    <div class="msg info">スタッフ専用の画面です。店長から聞いた6桁の登録コードを入れてください（最初の1回だけ）。</div>
+    <input class="code" id="code" inputmode="numeric" maxlength="6" placeholder="000000">
+    <button class="main-btn" id="go" onclick="register()">登録する</button>`);
+}
+
+async function register() {
+  if (busy) return;
+  busy = true;
+  const btn = document.getElementById('go');
+  btn.disabled = true; btn.textContent = '確かめています…';
+  try {
+    D = await api('staffRegister', { code: document.getElementById('code').value });
+    show('<div class="msg info">登録できました。これからは下のメニューの「シフト希望」から開けます。</div>');
+  } catch (e) { registerView(e.message); } finally { busy = false; }
+}
+
+// ---------- 希望を出す ----------
+function timeOptions(sel) {
+  const out = [];
+  for (let m = toMin(D.shop.open); m <= toMin(D.shop.close); m += D.shop.step) {
+    const t = toHHMM(m);
+    out.push(`<option ${t === sel ? 'selected' : ''}>${t}</option>`);
+  }
+  return out.join('');
+}
+
+function dayHtml(d) {
+  if (d.closed) return `<div class="day closed"><div class="day-head"><b>${md(d.date, d.weekday)}</b><span>店休</span></div></div>`;
+  const v = W[d.date] || '';
+  const kind = !v ? 'usual' : v === '休み' ? 'off' : 'time';
+  const [s, e] = kind === 'time' ? v.split('-') : (d.usual.includes('-') ? d.usual.split('-') : [D.shop.open, D.shop.close]);
+  return `<div class="day">
+    <div class="day-head"><b>${md(d.date, d.weekday)}</b><span class="muted">ふだん：${esc(d.usual)}</span></div>
+    <div class="choices">
+      <button class="${kind === 'usual' ? 'sel' : ''}" onclick="setWish('${d.date}', '')">ふだんどおり</button>
+      <button class="${kind === 'off' ? 'sel' : ''}" onclick="setWish('${d.date}', '休み')">休みたい</button>
+      <button class="${kind === 'time' ? 'sel' : ''}" onclick="setWish('${d.date}', '${s}-${e}')">時間を指定</button>
+    </div>
+    ${kind === 'time' ? `<div class="times">
+      <select onchange="setTime('${d.date}', 0, this.value)">${timeOptions(s)}</select><span>〜</span>
+      <select onchange="setTime('${d.date}', 1, this.value)">${timeOptions(e)}</select></div>` : ''}
+  </div>`;
+}
+
+function setWish(date, v) { W[date] = v; render(); }
+function setTime(date, i, t) { const p = W[date].split('-'); p[i] = t; W[date] = p.join('-'); render(); }
+
+function fixedHtml() {
+  return D.fixed.map(f => `<h2>決まったシフト（${md(f.start, wdOf(f.start))}〜${md(f.end, wdOf(f.end))}）</h2>
+    <div class="card">${f.days.map(x => `<div class="row ${/休/.test(x.cell) ? 'off' : ''}"><span>${md(x.date, x.weekday)}</span><span>${esc(x.cell || 'ふだんどおり')}</span></div>`).join('')}</div>`).join('');
+}
+
+let note = '';
+function render() {
+  const p = D.period;
+  const memo = document.getElementById('memo') ? document.getElementById('memo').value : (D.memo || '');
+  const y = window.scrollY;
+  view(`${note}
+    <div class="muted">${esc(D.me.name)}（${esc(D.me.role)}）</div>
+    ${fixedHtml()}
+    <h2>シフト希望（${md(p.start, wdOf(p.start))}〜${md(p.end, wdOf(p.end))}）</h2>
+    <div class="msg info">締切：${md(p.deadline, wdOf(p.deadline))} まで。${D.submittedAt ? '提出済み（' + esc(D.submittedAt) + '）。締切までは何度でも出し直せます。' : 'まだ出していません。'}</div>
+    ${D.days.map(dayHtml).join('')}
+    <h2>店長へひとこと（任意）</h2>
+    <textarea id="memo" maxlength="200">${esc(memo)}</textarea>
+    <button class="main-btn" id="go" onclick="submit()">${D.submittedAt ? '希望を出し直す' : '希望を出す'}</button>`);
+  window.scrollTo(0, y);
+}
+
+function show(msg) {
+  note = msg || '';
+  W = {};
+  D.days.forEach(d => { if (d.wish) W[d.date] = d.wish; });
+  render();
+  window.scrollTo(0, 0);
+}
+
+async function submit() {
+  if (busy) return;
+  busy = true;
+  const btn = document.getElementById('go');
+  btn.disabled = true; btn.textContent = '送っています…';
+  const wishes = {};
+  Object.keys(W).forEach(d => { if (W[d]) wishes[d] = W[d]; });
+  try {
+    D = await api('staffSubmit', { periodStart: D.period.start, wishes, memo: document.getElementById('memo').value });
+    show('<div class="msg info" style="font-weight:700">希望を出しました。決まったら LINE でお知らせします。</div>');
+  } catch (e) {
+    note = errBox(e.message); render(); window.scrollTo(0, 0);
+  } finally { busy = false; }
+}
+
+// ---------- 起動 ----------
+(async () => {
+  try {
+    if (!CFG.LIFF_ID || !CFG.API_URL) throw new Error('config.js の LIFF_ID と API_URL がまだ空です。');
+    await liff.init({ liffId: CFG.LIFF_ID });
+    if (!liff.isLoggedIn()) { liff.login({ redirectUri: location.href }); return; }
+    D = await api('staffInit');
+    sessionStorage.removeItem('retried');
+    if (!D.registered) registerView(); else show();
+  } catch (e) {
+    view(errBox('開けませんでした：' + e.message));
+  }
+})();
+</script>
+</body>
+</html>
